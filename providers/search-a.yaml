@@ -1,0 +1,5 @@
+id: search-a
+delivery:
+  local-mcp:
+    command: npx
+    args: [-y, '@brave/brave-search-mcp-server', --transport, stdio]

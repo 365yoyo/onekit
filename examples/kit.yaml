@@ -1,0 +1,11 @@
+name: my-kit
+targets:
+  - id: laptop
+    client: codex-cli
+  - id: work-chat
+    client: chatgpt
+tools:
+  - github
+  - local-tool
+capabilities:
+  - web-search

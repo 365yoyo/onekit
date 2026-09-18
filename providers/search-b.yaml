@@ -1,0 +1,4 @@
+id: search-b
+delivery:
+  remote-mcp:
+    url: https://mcp.exa.ai/mcp

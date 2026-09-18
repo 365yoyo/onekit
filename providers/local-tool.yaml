@@ -1,0 +1,5 @@
+id: local-tool
+delivery:
+  local-mcp:
+    command: npx
+    args: [-y, '@modelcontextprotocol/server-filesystem', .]

@@ -1,0 +1,4 @@
+id: github
+delivery:
+  remote-mcp:
+    url: https://api.githubcopilot.com/mcp/

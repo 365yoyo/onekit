@@ -1,0 +1,7 @@
+id: codex-cli
+consumes: [local-mcp, remote-mcp]
+control: write
+observable: true
+config: ~/.codex/config.toml
+writer: toml-region
+probe_command: codex

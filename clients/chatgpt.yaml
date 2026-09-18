@@ -1,0 +1,10 @@
+id: chatgpt
+consumes: [remote-mcp]
+control: manual
+observable: false
+procedure:
+  - Open ChatGPT Settings and enable developer mode if your workspace permits it.
+  - In ChatGPT Plugins, create a new MCP plugin named {name} with description "{item} via {name}".
+  - Select a direct remote HTTP MCP connection and enter {url}.
+  - Complete any required provider OAuth or workspace approval in ChatGPT.
+  - Review the discovered tools, then run onekit confirm for this target and item.
