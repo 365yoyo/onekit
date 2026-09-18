@@ -36,13 +36,22 @@ def resolve(kit: dict, catalog: dict) -> list[dict]:
                     if selected:
                         break
                     skipped.append(f"{provider_id}: no delivery consumed by {client_id}")
+                control = client["control"] if selected else "none"
+                if selected and control == "none":
+                    # A provider was compatible, but the client offers no setup
+                    # path at all. Say that rather than reporting success.
+                    reason = f"{client_id} has no configurable setup path"
+                elif skipped:
+                    reason = "; ".join(skipped)
+                else:
+                    reason = "first compatible provider"
                 row = {
                     "target": target["id"], "client": client_id,
                     "kind": kind, "item": item_id, "requested": choices.copy(),
                     "provider": selected[0] if selected else None,
                     "delivery": selected[1] if selected else None,
-                    "control": client["control"] if selected else "none",
-                    "reason": "; ".join(skipped) if skipped else "first compatible provider",
+                    "control": control,
+                    "reason": reason,
                 }
                 results.append(row)
     return results

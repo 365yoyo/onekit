@@ -4,36 +4,82 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 import yaml
 
-from core.compiler import compile_rows
+from core.compiler import apply_plans, compile_rows, pending_plans
 from core.doctor import report as doctor_report
-from core.loader import ROOT, DefinitionError, definitions_commit, load_catalog, load_kit
+from core.loader import (
+    CONTROLS, RESERVED_LOCK_KEYS, ROOT, DefinitionError, definitions_provenance,
+    load_catalog, load_kit,
+)
 from core.resolver import resolve
-from writers.toml_region import RegionError
+from writers import WriterError
+
+
+SETUP_STATES = {"pending", "complete", "asserted"}
+
+
+def _validate_lock(lock: dict, where: str) -> dict:
+    """Reject a malformed lock before it is trusted or written."""
+    if not isinstance(lock, dict) or lock.get("lock_version") != 1:
+        raise DefinitionError(f"{where} is not a OneKit v1 lock")
+    for key in ("definitions", "accepted_at"):
+        if not isinstance(lock.get(key), str) or not lock[key]:
+            raise DefinitionError(f"{where} is missing a valid '{key}'")
+    for item, entry in lock.items():
+        if item in RESERVED_LOCK_KEYS:
+            continue
+        if not isinstance(entry, dict):
+            raise DefinitionError(f"{where}: item '{item}' must be a mapping")
+        requested = entry.get("requested")
+        if not isinstance(requested, list) or not all(isinstance(x, str) for x in requested):
+            raise DefinitionError(f"{where}: item '{item}' needs a 'requested' list")
+        for target, state in entry.items():
+            if target == "requested":
+                continue
+            if not isinstance(state, dict):
+                raise DefinitionError(f"{where}: '{item}/{target}' must be a mapping")
+            for field in ("provider", "delivery", "control", "setup"):
+                if field not in state:
+                    raise DefinitionError(f"{where}: '{item}/{target}' is missing '{field}'")
+            if state["control"] not in CONTROLS:
+                raise DefinitionError(f"{where}: '{item}/{target}' has an invalid control")
+            if state["setup"] not in SETUP_STATES:
+                raise DefinitionError(f"{where}: '{item}/{target}' has an invalid setup state")
+    return lock
 
 
 def _lock(path: Path) -> dict:
     if not path.exists():
         return {}
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("lock_version") != 1:
-        raise DefinitionError("existing lock is not a OneKit v1 lock")
-    return value
+    return _validate_lock(value, f"lock {path}")
 
 
 def _save_lock(path: Path, lock: dict) -> None:
+    # The lock is OneKit-owned, validated before it is written, and replaced
+    # atomically so a crash cannot leave a half-written lock behind.
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock is OneKit-owned and is replaced only after validating its schema.
-    path.write_text(yaml.safe_dump(lock, sort_keys=False), encoding="utf-8")
+    descriptor, temp_name = tempfile.mkstemp(prefix=".onekit-lock-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(yaml.safe_dump(lock, sort_keys=False))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
-def _make_lock(rows: list[dict], old: dict, commit: str) -> dict:
-    lock = {"lock_version": 1, "definitions": f"onekit-defs@{commit}",
+def _make_lock(rows: list[dict], old: dict, provenance: str) -> dict:
+    lock = {"lock_version": 1, "definitions": provenance,
             "accepted_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
     for row in rows:
         item = lock.setdefault(row["item"], {"requested": row["requested"]})
@@ -54,9 +100,10 @@ def _show_resolution(rows: list[dict]) -> None:
         print(f"{row['target']} / {row['item']}: {selection}; {row['reason']}")
 
 
-def _show_diff(compiled: dict) -> None:
-    for target, plan in compiled["plans"].items():
-        print(f"{target}  {plan['path']}")
+def _show_changes(compiled: dict) -> None:
+    """Render the proposed changes. Makes no claim about what was written."""
+    for plan in compiled["plans"].values():
+        print(f"{', '.join(plan['targets'])}  {plan['path']}")
         for symbol, name in plan["changes"]:
             print(f"  {symbol} {name}")
         if not plan["changes"]:
@@ -67,7 +114,15 @@ def _show_diff(compiled: dict) -> None:
             print(f"  {index}. {step}")
     for item in compiled["blocked"]:
         print(f"{item['target']} / {item['item']}: blocked; {item['reason']}")
-    print("Nothing written.")
+
+
+def _require_force_consent() -> None:
+    """Ask for destructive consent, after the destructive diff has been shown."""
+    if not sys.stdin.isatty():
+        raise DefinitionError("--force requires interactive human confirmation")
+    answer = input("Destructive replacement requested. Type FORCE to continue: ")
+    if answer != "FORCE":
+        raise DefinitionError("force not confirmed")
 
 
 def _show_doctor(result: dict) -> None:
@@ -141,27 +196,38 @@ def main(argv: list[str] | None = None) -> int:
                 raise DefinitionError("lock decision does not match current resolution; run setup first")
             state["setup"] = "asserted" if not catalog["clients"][row["client"]]["observable"] else "complete"
             state["confirmed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            _validate_lock(lock, f"lock {lock_path}")
             _save_lock(lock_path, lock)
             print(f"{args.target} / {args.item}: {state['setup']}")
             return 0
-        if args.command == "setup" and args.force:
-            if not sys.stdin.isatty():
-                raise DefinitionError("--force requires interactive human confirmation")
-            answer = input("Destructive replacement requested. Type FORCE to continue: ")
-            if answer != "FORCE":
-                raise DefinitionError("force not confirmed")
-        compiled = compile_rows(kit, catalog, rows, force=args.command == "setup" and args.force)
-        _show_diff(compiled)
+
+        # diff and setup share one validate-then-plan phase. Nothing below
+        # mutates anything until every plan and the new lock have been built.
+        force = args.command == "setup" and args.force
+        compiled = compile_rows(kit, catalog, rows, force=force)
         if args.command == "diff":
+            _show_changes(compiled)
+            print("Nothing written.")
             return 0
-        commit = definitions_commit(args.definitions)
-        old = _lock(lock_path)
-        for plan in compiled["plans"].values():
-            plan["writer"].apply(plan)
-        _save_lock(lock_path, _make_lock(rows, old, commit))
+        provenance = definitions_provenance(args.definitions)
+        new_lock = _validate_lock(_make_lock(rows, _lock(lock_path), provenance),
+                                  "generated lock")
+        planned = pending_plans(compiled)
+        _show_changes(compiled)
+        if force:
+            _require_force_consent()
+        applied = apply_plans(planned)
+        _save_lock(lock_path, new_lock)
+        if applied:
+            total = sum(len(plan["changes"]) for plan in applied)
+            print(f"Applied {total} entry change(s) in {len(applied)} file(s):")
+            for plan in applied:
+                print(f"  {plan['path']}")
+        else:
+            print("No configuration changes were required.")
         print(f"Lock written: {lock_path}")
         return 0
-    except (DefinitionError, RegionError, OSError, yaml.YAMLError) as exc:
+    except (DefinitionError, WriterError, OSError, yaml.YAMLError) as exc:
         print(f"onekit: {exc}", file=sys.stderr)
         return 1
 

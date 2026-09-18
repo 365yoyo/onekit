@@ -8,7 +8,7 @@ OneKit is a small, extensible portability layer for AI toolkits. Describe the to
 
 > **OneKit is not your toolkit. OneKit makes your toolkit portable.**
 
-OneKit v0.0.1 supports Codex CLI and ChatGPT with a Git-versioned definitions catalogue.
+OneKit supports Codex CLI and ChatGPT, with a Git-versioned definitions catalogue that ships inside the installed package.
 
 ---
 
@@ -156,9 +156,13 @@ args = ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"]
 # <<< onekit
 ```
 
-Before replacement, OneKit verifies ownership and integrity. It refuses to overwrite a managed region that has been edited outside OneKit. It does not claim or alter unmanaged entries, and it removes owned entries that leave the Kit.
+Before replacement, OneKit verifies ownership and integrity. It refuses to overwrite a managed region that has been edited outside OneKit. It does not claim or alter unmanaged entries, and it removes owned entries that leave the Kit. Several targets may share one configuration file — the marker then lists them — but two different Kits may not.
 
-`onekit diff` reads the proposed changes without writing. `setup` also shows that diff before applying it. `--force` is destructive: it requires interactive human confirmation and fails in non-interactive sessions.
+`setup` validates everything it can before touching the filesystem, then writes. If a later write fails, the files already written are rolled back and OneKit reports that nothing remains applied; the lock is saved only once every mutation has succeeded, so configuration and lock cannot diverge because of a failure.
+
+`onekit diff` reads the proposed changes without writing. `setup` shows the same changes before applying them. `--force` is destructive: it shows the diff, *then* requires a human to type `FORCE` at a terminal, and it fails outright in a non-interactive session.
+
+[docs/concepts.md](docs/concepts.md) describes managed regions, the lock and the setup sequence in full.
 
 ---
 
@@ -166,7 +170,9 @@ Before replacement, OneKit verifies ownership and integrity. It refuses to overw
 
 Give a coding agent the public [install document](https://raw.githubusercontent.com/365yoyo/onekit/main/docs/install.md). It tells the agent how to clone OneKit, install it in a virtual environment, run the read-only `onekit probe`, report what it found, and stop. Installation does not run `setup` or change client configuration.
 
-To configure a Kit after installation, start with [the example Kit](examples/kit.yaml). Run `.venv/bin/onekit --kit examples/kit.yaml resolve` and then `.venv/bin/onekit --kit examples/kit.yaml diff` from the checkout. Run `setup` with the same `--kit` option only after reviewing the proposed changes.
+OneKit installs as a normal Python package — `pip install .` — and the definitions catalogue ships inside it, so `onekit` runs from any directory without needing a Git checkout.
+
+To configure a Kit after installation, start with [the example Kit](examples/kit.yaml). Run `onekit --kit examples/kit.yaml resolve`, then `onekit --kit examples/kit.yaml diff`. Run `setup` with the same `--kit` option only after reviewing the proposed changes.
 
 ---
 
@@ -180,7 +186,7 @@ To configure a Kit after installation, start with [the example Kit](examples/kit
 
 `doctor` reports both **available** and **configured** counts. Where a manual client's state cannot be read programmatically, a person's `confirm` records an asserted completion.
 
-With a lock, the v0.0.1 drift demonstration is fixture-driven:
+With a lock, the drift demonstration is fixture-driven:
 
 ```text
 $ onekit doctor --fixture search-a-down
@@ -208,7 +214,9 @@ The design invariant is:
 
 Adding a provider or capability normally takes one YAML file. A new client takes a client definition and an existing writer, or a new reusable writer if its storage format is new. The resolver does not learn client-specific syntax.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the definition formats and contribution steps.
+A writer declares which delivery mechanisms it can express, and raises one shared `WriterError`. OneKit never re-labels a delivery mechanism to make it fit a writer that cannot express it — it reports the gap and writes nothing.
+
+See [docs/adding-support.md](docs/adding-support.md) for the formats and the writer interface, and [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
 
 ---
 
@@ -222,20 +230,23 @@ onekit/
 ├── capabilities/    ordered provider lists
 ├── writers/         format-specific managed regions
 ├── skills/onekit/   agent workflow
-├── docs/install.md  URL-first installation
 ├── examples/kit.yaml
+├── docs/
+│   ├── install.md          URL-first installation
+│   ├── concepts.md         how resolution, control, regions and the lock work
+│   └── adding-support.md   providers, capabilities, clients, writers
 └── CONTRIBUTING.md
 ```
 
-The user-facing entry points are this README, the install URL, a Kit and `doctor`. The catalogue and writers are for contributors.
+The user-facing entry points are this README, the install URL, a Kit and `doctor`. The catalogue, writers and `docs/adding-support.md` are for contributors.
 
 ---
 
-## What v0.0.1 Does Not Solve
+## What OneKit Does Not Solve
 
 There is no `control: agent`, runtime health monitoring, automatic failover or update, provider version pinning, capability contracts, conformance suite, hosted registry, marketplace, execution proxy or web UI.
 
-A lock pins the definitions commit and reproduces OneKit's resolution decision. It does not pin provider packages or services, so it cannot guarantee a byte-for-byte reproduction of their implementations.
+A lock records the definitions that produced it — the exact commit from a Git checkout, or the release version from an installed package — and reproduces OneKit's resolution decision. It does not pin provider packages or services, so it cannot guarantee a byte-for-byte reproduction of their implementations.
 
 Kits contain no secrets. Locks contain decisions, not credentials. Clients authenticate directly to providers. Provider output remains untrusted, and inclusion in a capability list is a compatibility assertion rather than a safety guarantee.
 

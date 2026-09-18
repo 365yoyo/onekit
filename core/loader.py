@@ -1,7 +1,8 @@
-"""Load and validate Kits and the Git-native definitions catalogue."""
+"""Load and validate Kits and the definitions catalogue."""
 
 from __future__ import annotations
 
+from importlib import metadata
 from pathlib import Path
 import re
 import subprocess
@@ -9,10 +10,30 @@ import subprocess
 import yaml
 
 
-ROOT = Path(__file__).resolve().parent.parent
+CATALOGUE_KINDS = ("clients", "providers", "capabilities")
+
+
+def default_root() -> Path:
+    """Locate the definitions catalogue for a checkout or an installed package.
+
+    In a source checkout the catalogue sits beside ``core/``. An installed
+    distribution ships the same YAML as package data inside ``core/``. Neither
+    location depends on the current working directory.
+    """
+    package = Path(__file__).resolve().parent
+    checkout = package.parent
+    if all((checkout / kind).is_dir() for kind in CATALOGUE_KINDS):
+        return checkout
+    return package
+
+
+ROOT = default_root()
 ID = re.compile(r"^[a-z][a-z0-9-]*$")
 DELIVERIES = {"local-mcp", "remote-mcp", "exec"}
 CONTROLS = {"write", "manual", "none"}
+# Top-level lock keys OneKit owns. A Kit item sharing one of these names would
+# overwrite lock metadata, so it is rejected at validation time.
+RESERVED_LOCK_KEYS = {"lock_version", "definitions", "accepted_at"}
 
 
 class DefinitionError(ValueError):
@@ -69,14 +90,21 @@ def load_kit(path: Path) -> dict:
         raise DefinitionError("Kit target ids must be unique")
     _id_list(kit.get("tools", []), "Kit tools")
     _id_list(kit.get("capabilities", []), "Kit capabilities")
+    items = set(kit.get("tools", [])) | set(kit.get("capabilities", []))
     if set(kit.get("tools", [])) & set(kit.get("capabilities", [])):
         raise DefinitionError("tool and capability ids must not overlap in a Kit")
+    reserved = sorted(items & RESERVED_LOCK_KEYS)
+    if reserved:
+        raise DefinitionError(
+            f"Kit item ids reserved by the lock file: {', '.join(reserved)}"
+        )
     return kit
 
 
-def load_catalog(root: Path = ROOT) -> dict:
+def load_catalog(root: Path = None) -> dict:
+    root = ROOT if root is None else root
     catalog = {"clients": {}, "providers": {}, "capabilities": {}, "root": root}
-    for kind in ("clients", "providers", "capabilities"):
+    for kind in CATALOGUE_KINDS:
         directory = root / kind
         if not directory.is_dir():
             raise DefinitionError(f"missing catalogue directory: {directory}")
@@ -111,8 +139,7 @@ def load_catalog(root: Path = ROOT) -> dict:
                 if definition["control"] == "write":
                     if not isinstance(definition.get("config"), str) or not definition["config"]:
                         raise DefinitionError(f"{path}: write client needs config path")
-                    if not isinstance(definition.get("writer"), str):
-                        raise DefinitionError(f"{path}: write client needs writer")
+                    _id(definition.get("writer"), f"{path} writer")
                 if definition["control"] == "manual":
                     steps = definition.get("procedure")
                     if not isinstance(steps, list) or not steps or not all(isinstance(s, str) for s in steps):
@@ -121,18 +148,46 @@ def load_catalog(root: Path = ROOT) -> dict:
     return catalog
 
 
-def definitions_commit(root: Path = ROOT) -> str:
+def _git_commit(root: Path) -> str | None:
+    """Return the commit pinning this catalogue, or None if it is not in Git.
+
+    The catalogue directories must belong to the repository found from ``root``;
+    otherwise an unrelated enclosing repository (an installed package inside a
+    checkout, say) would supply a meaningless commit.
+    """
+    def run(*arguments: str) -> str:
+        return subprocess.run(["git", *arguments], cwd=root, check=True,
+                              capture_output=True, text=True).stdout.strip()
     try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
-            capture_output=True, text=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--", "clients", "providers", "capabilities"],
-            cwd=root, check=True, capture_output=True, text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise DefinitionError("definitions require a Git commit") from exc
+        toplevel = Path(run("rev-parse", "--show-toplevel")).resolve()
+        if not all((toplevel / kind).resolve() == (root / kind).resolve()
+                   for kind in CATALOGUE_KINDS):
+            return None
+        commit = run("rev-parse", "HEAD")
+        dirty = run("status", "--porcelain", "--", *CATALOGUE_KINDS)
+    except (OSError, subprocess.CalledProcessError):
+        return None
     if dirty:
-        raise DefinitionError("definitions contain uncommitted changes; commit them before locking")
+        raise DefinitionError(
+            "definitions contain uncommitted changes; commit them before locking"
+        )
     return commit
+
+
+def definitions_provenance(root: Path = None) -> str:
+    """Identify the definitions used to resolve a Kit.
+
+    A Git checkout pins an exact commit. An installed release has no repository,
+    so the distribution version identifies its bundled catalogue instead.
+    """
+    root = ROOT if root is None else root
+    commit = _git_commit(root)
+    if commit:
+        return f"onekit-defs@{commit}"
+    try:
+        return f"onekit-defs@v{metadata.version('onekit')}"
+    except metadata.PackageNotFoundError as exc:
+        raise DefinitionError(
+            "cannot identify the definitions: not a Git checkout and OneKit is "
+            "not installed as a package"
+        ) from exc

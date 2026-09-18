@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "onekit"
-version = "0.0.1"
+version = "0.0.2"
 description = "Compile a portable AI toolkit Kit for supported clients"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6,<7"]
@@ -12,5 +12,18 @@ dependencies = ["PyYAML>=6,<7"]
 [project.scripts]
 onekit = "core.cli:main"
 
+# The catalogue stays at the top level of the repository for contributors, and
+# ships inside the core package so an installed OneKit can find it without a
+# Git checkout or a particular working directory.
 [tool.setuptools]
-packages = ["core", "writers"]
+packages = ["core", "core.clients", "core.providers", "core.capabilities", "writers"]
+
+[tool.setuptools.package-dir]
+"core.clients" = "clients"
+"core.providers" = "providers"
+"core.capabilities" = "capabilities"
+
+[tool.setuptools.package-data]
+"core.clients" = ["*.yaml"]
+"core.providers" = ["*.yaml"]
+"core.capabilities" = ["*.yaml"]
